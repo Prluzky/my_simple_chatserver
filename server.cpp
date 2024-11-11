@@ -341,6 +341,7 @@ int main(){
     socket_address_storage addr;
     while(true){
         int connid = CHECK_CALL(accept, listenfd, &addr.m_addr, &addr.m_addrlen);
+        fmt::println("接受连接：{}", connid);
         //detach可能导致内存泄漏
         //线程里最好用值捕获，visit就地调用可以用引用捕获
         //显式构造thread并放入线程池
@@ -353,11 +354,12 @@ int main(){
             }while(!req_parse.request_finished());
             // auto req = req_parse.m_header; //不需要判断字符串尾部是否为\0
             // fmt::println("request: {}", req);
-            fmt::println("收到请求头： {}", req_parse.m_header_raw());
-            fmt::println("收到请求正文：{}", req_parse.body());
+            fmt::println("受到请求：{}", connid);
+            // fmt::println("收到请求头： {}", req_parse.m_header_raw());
+            // fmt::println("收到请求正文：{}", req_parse.body());
             // std::string res = "你好！" + req;
             std::string body = req_parse.body();
-            fmt::println("{}, {}, {}", req_parse.method(), req_parse.url(), req_parse.http_version());
+            // fmt::println("{}, {}, {}", req_parse.method(), req_parse.url(), req_parse.http_version());
             // 构造响应
 
             if(body.empty()){
@@ -368,6 +370,7 @@ int main(){
             http_response_writer res_writer;
             res_writer.begin_header(200);
             res_writer.write_header("Server", "ChatServer");
+            res_writer.write_header("Content-type", "text/html;charset=utf-8");
             res_writer.write_header("Connection", "close");
             res_writer.write_header("Content_length", std::to_string(body.size()));
             res_writer.end_header();
@@ -375,9 +378,11 @@ int main(){
             auto buffer = res_writer.buffer();
             CHECK_CALL(write, connid, buffer.data(), buffer.size());
             CHECK_CALL(write, connid, body.data(), body.size());
+            fmt::println("正在响应：{}", connid);
             // res_writer.write_body();
-            fmt::println("我的响应头：{}", buffer);
-            fmt::println("我的响应正文：{}", body);
+            // fmt::println("我的响应头：{}", buffer);
+            // fmt::println("我的响应正文：{}", body);
+            fmt::println("连接结束: {}", connid);
             close(connid);
         });
     }
