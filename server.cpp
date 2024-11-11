@@ -12,24 +12,41 @@
 #include <algorithm>
 #include <map>
 #include <cassert>
-int check_error(const char *msg, int res){
+#include <clocale>
+
+std::error_category const &gai_category() {
+    // struct gai_category : std::error_category{
+    //     char const *name() const noexcept override {
+    //         return "getaddrinfo";
+    //     }
+    //     std::string message(int err) const override{
+    //         return gai_strerror(err);
+    //     }
+    // };
+    // static gai_category instance;
+    //简写
+    static struct gai_category final : std::error_category{
+        char const *name() const noexcept override {
+            return "getaddrinfo";
+        }
+        std::string message(int err) const override{
+            return gai_strerror(err);
+        }
+    } instance;
+    return instance;
+}
+
+template <class T>
+T check_error(const char *msg, int res){
     if(res == -1){
-        fmt::println("{}: {}",msg, gai_strerror(errno));
-        throw;
+        fmt::println(stderr, "{}: {}", msg, strerror(errno));
+        auto ec = std::error_code(errno, std::system_category());
+        throw std::system_error(ec, msg);
     }
     return res;
 }
-
-size_t check_error(const char *msg, ssize_t res){
-    if(res == -1){
-        fmt::println("{}: {}",msg, gai_strerror(errno));
-        throw;
-    }
-    return res;
-}
-
 //
-#define CHECK_CALL(func, ...) check_error(#func, func(__VA_ARGS__));
+#define CHECK_CALL(func, ...) check_error<int>(#func, func(__VA_ARGS__));
 
 //封装胖指针
 struct socket_address_fatptr {
@@ -81,7 +98,8 @@ struct address_resolver {
         int err = getaddrinfo(name.c_str(), service.c_str(), NULL, &m_head);
         if(err != 0){
             fmt::println("getaddrinfo: {}, {}",gai_strerror(err), err);
-            throw;
+            auto ec = std::error_code(err, gai_category());
+            throw std::system_error(ec, name + ": " + service);
         }
     }
     address_resolved_entry get_first_entry(){
@@ -330,8 +348,8 @@ struct http_response_writer{
 
 //简单线程池
 std::vector<std::thread> pool;
-int main(){
-    setlocale(LC_ALL, "zh_CN");
+
+void server() {
     address_resolver resolver;
     resolver.resolve("127.0.0.1", "8080");
     fmt::println("正在监听127.0.0.1:8080");
@@ -393,6 +411,17 @@ int main(){
         });
     }
     //对线程池里所有线程进行join
+    for(auto &t : pool)
+        {t.join();}
+}
+
+int main(){
+    setlocale(LC_ALL, "zh_CN.UTF-8");
+    try{
+        server();
+    }catch (std::exception const &e){
+        fmt::println("错误： {}", e.what());
+    }
     for(auto &t : pool)
         {t.join();}
     return 0;
