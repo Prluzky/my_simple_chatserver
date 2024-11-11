@@ -310,7 +310,7 @@ struct http_response_parser : _http_base_parser<HeaderParser>{
 
 //构造响应
 struct http_response_writer{
-    std::string header;
+    std::string header = "";
     std::string buffer(){
         return header;
     }
@@ -322,7 +322,7 @@ struct http_response_writer{
         header.append(temp);
     }
     void end_header(){
-        header.append("\r\n\r\n");
+        header.append("\r\n");
     }
 };
 
@@ -346,42 +346,48 @@ int main(){
         //线程里最好用值捕获，visit就地调用可以用引用捕获
         //显式构造thread并放入线程池
         pool.emplace_back([connid] {
-            char buf[1024];
-            http_request_parser req_parse;
-            do{
-                size_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
-                req_parse.push_chunk(std::string_view(buf, n)); 
-            }while(!req_parse.request_finished());
-            // auto req = req_parse.m_header; //不需要判断字符串尾部是否为\0
-            // fmt::println("request: {}", req);
-            fmt::println("受到请求：{}", connid);
-            // fmt::println("收到请求头： {}", req_parse.m_header_raw());
-            // fmt::println("收到请求正文：{}", req_parse.body());
-            // std::string res = "你好！" + req;
-            std::string body = req_parse.body();
-            // fmt::println("{}, {}, {}", req_parse.method(), req_parse.url(), req_parse.http_version());
-            // 构造响应
+            while(true){
+                char buf[1024];
+                http_request_parser req_parse;
+                do{
+                    size_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
+                    //n为0表示读完了，还需要判断n为负数(出错)的情况
+                    if(n == 0){
+                        fmt::println("读到末尾，对面关闭连接");
+                        return;
+                    }
+                    req_parse.push_chunk(std::string_view(buf, n)); 
+                }while(!req_parse.request_finished());
+                // auto req = req_parse.m_header; //不需要判断字符串尾部是否为\0
+                // fmt::println("request: {}", req);
+                fmt::println("收到请求：{}", connid);
+                // fmt::println("收到请求头： {}", req_parse.m_header_raw());
+                // fmt::println("收到请求正文：{}", req_parse.body());
+                // std::string res = "你好！" + req;
+                std::string body = req_parse.body();
+                // fmt::println("{}, {}, {}", req_parse.method(), req_parse.url(), req_parse.http_version());
+                // 构造响应
 
-            if(body.empty()){
-                body = "你好，你的请求正文为空！";
-            }else {
-                body = "你好，你的请求是：[" + body + "]";
+                if(body.empty()){
+                    body = "你好，你的请求正文为空！\r\n";
+                }else {
+                    body = "你好，你的请求是：[" + body + "]";
+                }
+                http_response_writer res_writer;
+                res_writer.begin_header(200);
+                res_writer.write_header("Server", "ChatServer");
+                res_writer.write_header("Content-Type", "text/html;charset=utf-8");
+                res_writer.write_header("Connection", "keep-alive");
+                res_writer.write_header("Content-Length", std::to_string(body.size()));
+                res_writer.end_header();
+                //保证效率，组完头部就直接写
+                auto buffer = res_writer.buffer();
+                fmt::println("正在响应：{}", connid);
+                CHECK_CALL(write, connid, buffer.data(), buffer.size());
+                CHECK_CALL(write, connid, body.data(), body.size());
+                fmt::println("我的响应头：{}", buffer);
+                fmt::println("我的响应正文：{}", body);
             }
-            http_response_writer res_writer;
-            res_writer.begin_header(200);
-            res_writer.write_header("Server", "ChatServer");
-            res_writer.write_header("Content-type", "text/html;charset=utf-8");
-            res_writer.write_header("Connection", "close");
-            res_writer.write_header("Content_length", std::to_string(body.size()));
-            res_writer.end_header();
-            //保证效率，组完头部就直接写
-            auto buffer = res_writer.buffer();
-            CHECK_CALL(write, connid, buffer.data(), buffer.size());
-            CHECK_CALL(write, connid, body.data(), body.size());
-            fmt::println("正在响应：{}", connid);
-            // res_writer.write_body();
-            // fmt::println("我的响应头：{}", buffer);
-            // fmt::println("我的响应正文：{}", body);
             fmt::println("连接结束: {}", connid);
             close(connid);
         });
