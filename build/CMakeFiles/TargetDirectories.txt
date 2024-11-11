@@ -1,0 +1,3 @@
+/home/zh/桌面/project/vscode/ChatServer/build/CMakeFiles/chatserver.dir
+/home/zh/桌面/project/vscode/ChatServer/build/CMakeFiles/edit_cache.dir
+/home/zh/桌面/project/vscode/ChatServer/build/CMakeFiles/rebuild_cache.dir

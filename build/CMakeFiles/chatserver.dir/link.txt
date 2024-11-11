@@ -1,0 +1,1 @@
+/usr/bin/g++ -g CMakeFiles/chatserver.dir/server.cpp.o -o chatserver  /usr/local/lib/libfmt.a

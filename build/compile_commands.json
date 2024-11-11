@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/zh/桌面/project/vscode/ChatServer/build",
+  "command": "/usr/bin/g++   -g -o CMakeFiles/chatserver.dir/server.cpp.o -c /home/zh/桌面/project/vscode/ChatServer/server.cpp",
+  "file": "/home/zh/桌面/project/vscode/ChatServer/server.cpp",
+  "output": "CMakeFiles/chatserver.dir/server.cpp.o"
+}
+]
