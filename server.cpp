@@ -315,7 +315,7 @@ struct http_response_writer{
         return header;
     }
     void begin_header(int status){
-        header.append("HTTP/1.1 " + std::to_string(status) + "OK" + "\r\n");
+        header.append("HTTP/1.1 " + std::to_string(status) + " OK" + "\r\n");
     }
     void write_header(std::string a, std::string b){
         std::string temp = a + ": " + b + "\r\n";
@@ -359,6 +359,12 @@ int main(){
             std::string body = req_parse.body();
             fmt::println("{}, {}, {}", req_parse.method(), req_parse.url(), req_parse.http_version());
             // 构造响应
+
+            if(body.empty()){
+                body = "你好，你的请求正文为空！";
+            }else {
+                body = "你好，你的请求是：[" + body + "]";
+            }
             http_response_writer res_writer;
             res_writer.begin_header(200);
             res_writer.write_header("Server", "ChatServer");
