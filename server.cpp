@@ -36,63 +36,74 @@ std::error_category const &gai_category() {
     return instance;
 }
 
-template <class T>
-T check_error(const char *msg, int res){
+template <int Except = 0, class T>
+T check_error(const char *what, T res){
     if(res == -1){
-        fmt::println(stderr, "{}: {}", msg, strerror(errno));
+        if constexpr (Except != 0){
+            if(errno == Except){
+                return -1;
+            }
+        }
         auto ec = std::error_code(errno, std::system_category());
-        throw std::system_error(ec, msg);
+        fmt::println(stderr, "{}: {}", what, ec.message());
+        throw std::system_error(ec, what);
     }
     return res;
 }
 //
-#define CHECK_CALL(func, ...) check_error<int>(#func, func(__VA_ARGS__));
 
-//封装胖指针
-struct socket_address_fatptr {
-    struct sockaddr *m_addr;
-    socklen_t m_addrlen;
-};
+#define SOURCE_INFO_IMPL(file, line) "In " file ": " #line ": "
+#define SOURCE_INFO() SOURCE_INFO_IMPL(__FILE__, __LINE__)
+#define CHECK_CALL_EXCEPT(except, func, ...) check_error<except>(SOURCE_INFO() #func, func(__VA_ARGS__))
+#define CHECK_CALL(func, ...) check_error(SOURCE_INFO() #func, func(__VA_ARGS__))
 
-struct socket_address_storage{
-    union {
-        struct sockaddr m_addr;
-        struct sockaddr_storage m_addr_storage;
-    };
-    socklen_t m_addrlen = sizeof(struct sockaddr_storage);
-
-    operator socket_address_fatptr(){
-        return {&m_addr, m_addrlen};
-    }
-};
-
-struct address_resolved_entry{
-    struct addrinfo *m_curr = nullptr;
-    socket_address_fatptr get_address() const {
-        return {m_curr->ai_addr, m_curr->ai_addrlen};
-    }
-    int create_socket() const {
-        // 这样写有点不方便，用宏来封装
-        // int sockfd = check_error("socket", socket(m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol));
-        int sockfd = CHECK_CALL(socket, m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol);
-        return sockfd;
-    }
-
-    int create_socket_and_bind() const{
-        int sockfd = create_socket();
-        socket_address_fatptr serve_addr = get_address();   //在entry对象还活着的时候取出来
-        CHECK_CALL(bind, sockfd, serve_addr.m_addr, serve_addr.m_addrlen);
-        return sockfd;
-    }
-    [[nodiscared]] bool next_entry(){
-        m_curr = m_curr->ai_next;
-        if(m_curr == nullptr){
-            return false;
-        }
-        return true;
-    }
-};
 struct address_resolver {
+
+    //封装胖指针
+    struct socket_address_fatptr {
+        struct sockaddr *m_addr;
+        socklen_t m_addrlen;
+    };
+
+    struct socket_address_storage{
+        union {
+            struct sockaddr m_addr;
+            struct sockaddr_storage m_addr_storage;
+        };
+        socklen_t m_addrlen = sizeof(struct sockaddr_storage);
+
+        operator socket_address_fatptr(){
+            return {&m_addr, m_addrlen};
+        }
+    };
+
+    struct address_resolved_entry{
+        struct addrinfo *m_curr = nullptr;
+        socket_address_fatptr get_address() const {
+            return {m_curr->ai_addr, m_curr->ai_addrlen};
+        }
+        int create_socket() const {
+            // 这样写有点不方便，用宏来封装
+            // int sockfd = check_error("socket", socket(m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol));
+            int sockfd = CHECK_CALL(socket, m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol);
+            return sockfd;
+        }
+
+        int create_socket_and_bind() const{
+            int sockfd = create_socket();
+            socket_address_fatptr serve_addr = get_address();   //在entry对象还活着的时候取出来
+            CHECK_CALL(bind, sockfd, serve_addr.m_addr, serve_addr.m_addrlen);
+            return sockfd;
+        }
+        [[nodiscared]] bool next_entry(){
+            m_curr = m_curr->ai_next;
+            if(m_curr == nullptr){
+                return false;
+            }
+            return true;
+        }
+    };
+
     struct addrinfo *m_head = nullptr;
     void resolve(std::string const &name, std::string const &service){
         int err = getaddrinfo(name.c_str(), service.c_str(), NULL, &m_head);
@@ -356,7 +367,7 @@ void server() {
     auto entry = resolver.get_first_entry();
     int listenfd = entry.create_socket_and_bind();
     CHECK_CALL(listen, listenfd, SOMAXCONN);
-    socket_address_storage addr;
+    address_resolver::socket_address_storage addr;
     while(true){
         int connid = CHECK_CALL(accept, listenfd, &addr.m_addr, &addr.m_addrlen);
         fmt::println("接受连接：{}", connid);
@@ -401,8 +412,11 @@ void server() {
                 //保证效率，组完头部就直接写
                 auto buffer = res_writer.buffer();
                 fmt::println("正在响应：{}", connid);
-                CHECK_CALL(write, connid, buffer.data(), buffer.size());
-                CHECK_CALL(write, connid, body.data(), body.size());
+                
+                if(CHECK_CALL_EXCEPT(EPIPE, write, connid, buffer.data(), buffer.size()) == -1)
+                    break;
+                if(CHECK_CALL_EXCEPT(EPIPE, write, connid, body.data(), body.size()) == -1)
+                    break;
                 fmt::println("我的响应头：{}", buffer);
                 fmt::println("我的响应正文：{}", body);
             }
