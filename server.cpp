@@ -18,6 +18,7 @@
 #include <string.h>
 #include <utility>
 #include <vector>
+#include <memory>
 
 struct no_move {
     no_move() = default;
@@ -28,15 +29,6 @@ struct no_move {
 };
 
 std::error_category const &gai_category() {
-    // struct gai_category : std::error_category{
-    //     char const *name() const noexcept override {
-    //         return "getaddrinfo";
-    //     }
-    //     std::string message(int err) const override{
-    //         return gai_strerror(err);
-    //     }
-    // };
-    // static gai_category instance;
     //简写
     static struct gai_category final : std::error_category{
         char const *name() const noexcept override {
@@ -70,9 +62,9 @@ T check_error(const char *what, T res){
 }
 //
 
-// #define SOURCE_INFO_IMPL_2(file, line) "In " file ":" #line ": "
-// #define SOURCE_INFO_IMPL(file, line) SOURCE_INFO_IMPL_2(file, line)
-#define SOURCE_INFO_IMPL(file, line) "In " file ":" #line ": "
+#define SOURCE_INFO_IMPL_2(file, line) "In " file ":" #line ": "
+#define SOURCE_INFO_IMPL(file, line) SOURCE_INFO_IMPL_2(file, line)
+// #define SOURCE_INFO_IMPL(file, line) "In " file ":" #line ": "
 #define SOURCE_INFO() SOURCE_INFO_IMPL(__FILE__, __LINE__)
 #define CHECK_CALL_EXCEPT(except, func, ...) check_error<except>(SOURCE_INFO() #func, func(__VA_ARGS__))
 #define CHECK_CALL(func, ...) check_error(SOURCE_INFO() #func, func(__VA_ARGS__))
@@ -128,7 +120,6 @@ struct address_resolver {
     };
 
     struct addrinfo *m_head = nullptr;
-    //todo，原项目是addrinfo
     address_info resolve(std::string const &name, std::string const &service){
         int err = getaddrinfo(name.c_str(), service.c_str(), NULL, &m_head);
         if(err != 0){
@@ -335,6 +326,15 @@ struct http11_request_parser {
     string_map m_header_keys;
     std::string m_body;
     bool m_header_finished = false;
+
+    void reset_state() {
+        m_header.clear();
+        m_heading_line.clear();
+        m_header_keys.clear();
+        m_body.clear();
+        m_header_finished = 0;
+    }
+
     //正文结束不需要更多字节
     [[nodiscared]] bool header_finished() {
         return m_header_finished;
@@ -567,7 +567,7 @@ struct http_response_parser : _http_base_parser<HeaderParser>{
 };
 
 //构造响应
-struct http11_head_writer{
+struct http11_header_writer{
     bytes_buffer m_buffer;
 
     void reset_state() {
@@ -598,98 +598,293 @@ struct http11_head_writer{
 };
 
 
-template<class HeaderWriter = http11_head_writer>
-struct http_response_writer {
+template <class HeaderWriter = http11_header_writer>
+struct _http_base_writer {
     HeaderWriter m_header_writer;
-    bytes_buffer &buffer() {
-        return m_header_writer.buffer();
+
+    void _begin_header(std::string_view first, std::string_view second, std::string_view third) {
+        m_header_writer.begin_header(first, second, third);
     }
 
-    void begin_header(int status) {
-        m_header_writer.begin_header("HTTP/1.1", std::to_string(status), "OK");
+    void reset_state() {
+        m_header_writer.reset_state();
+    }
+
+    bytes_buffer &buffer() {
+        return m_header_writer.buffer();
     }
 
     void write_header(std::string_view key, std::string_view value) {
         m_header_writer.write_header(key, value);
     }
 
-    void end_header(){
+    void end_header() {
         m_header_writer.end_header();
+    }
+
+    void write_body(std::string_view body) {
+        m_header_writer.buffer().append(body);
     }
 };
 
-//简单线程池
-std::vector<std::thread> pool;
+template <class HeaderWriter = http11_header_writer>
+struct http_request_writer : _http_base_writer<HeaderWriter> {
+    void begin_header(int status) {
+        this->_begin_header("HTTP/1.1", std::to_string(status), "OK");
+    }
+};
 
-void server() {
-    address_resolver resolver;
-    fmt::println("正在监听：127.0.0.1:8080");
-    auto entry = resolver.resolve("127.0.0.1", "8080");
-    int listenfd = entry.create_socket_and_bind();
-    // CHECK_CALL(listen, listenfd, SOMAXCONN);
-    // address_resolver::socket_address_storage addr;
-    while(true){
-        address_resolver::address addr;
-        int connid = CHECK_CALL(accept, listenfd, &addr.m_addr, &addr.m_addrlen);
-        fmt::println("接受了一个连接: {}", connid);
-        //detach可能导致内存泄漏
-        //线程里最好用值捕获，visit就地调用可以用引用捕获
-        //显式构造thread并放入线程池
-        pool.emplace_back([connid] {
-                bytes_buffer buf(1024);
-                while(true){
-                    http_request_parser req_parse;
-                    fmt::println("开始读取...");
-                    do {
-                        // 注意：TCP 基于流，可能粘包
-                        size_t n = CHECK_CALL(read, connid, buf.data(), buf.size());
-                        // 如果读到 EOF，说明对面，关闭了连接
-                        if (n == 0) {
-                            fmt::println("收到对面关闭了连接: {}", connid);
-                            goto quit;
-                        }
-                        fmt::println("读取到了 {} 字节: {}", n, std::string_view{buf.data(), n});
-                        // 成功读取，则推入解析
-                        req_parse.push_chunk(buf.subspan(0, n));
-                    } while (!req_parse.request_finished());
-                    fmt::println("收到请求: {}", connid);
-                    // fmt::println("请求头: {}", req_parse.headers_raw());
-                    // fmt::println("请求正文: {}", req_parse.body());
-                    std::string body = req_parse.body();
-                    if (body.empty()) {
-                        body = "你好，你的请求正文为空哦";
-                    } else {
-                        body = fmt::format("你好，你的请求是: [{}]，共 {} 字节", body, body.size());
-                    }
-                    http_response_writer res_writer;
-                    res_writer.begin_header(200);
-                    res_writer.write_header("Server", "co_http");
-                    res_writer.write_header("Content-type", "text/html;charset=utf-8");
-                    res_writer.write_header("Connection", "keep-alive");
-                    res_writer.write_header("Content-length", std::to_string(body.size()));
-                    res_writer.end_header();
-                    auto &buffer = res_writer.buffer();
-                    CHECK_CALL(write, connid, buffer.data(), buffer.size());
-                    CHECK_CALL(write, connid, body.data(), body.size());
-                    // fmt::println("我的响应头: {}", buffer);
-                    // fmt::println("我的响应正文: {}", body);
-                    fmt::println("正在响应: {}", connid);
-                }
-            quit:
-                fmt::println("连接结束: {}", connid);
-                close(connid);
+
+template<class HeaderWriter = http11_header_writer>
+struct http_response_writer : _http_base_writer<HeaderWriter>{
+    void begin_header(int status) {
+        this->_begin_header("HTTP/1.1", std::to_string(status), "OK");
+    }
+};
+
+//构造回调
+template <class ...Args>
+struct callback {
+    struct _callback_base {
+        virtual void _call(Args... args) = 0;
+        virtual ~_callback_base() = default;
+    };
+    template <class F>
+    struct _callback_impl final : _callback_base {
+        F m_func;
+        template <class ...Ts, class = std::enable_if_t<std::is_constructible_v<F, Ts...>>>
+        _callback_impl(Ts &&...ts) : m_func(std::forward<Ts>(ts)...) {}
+        void _call(Args... args) override {
+            m_func(std::forward<Args>(args)...);
+        }
+    };
+    std::unique_ptr<_callback_base> m_base;
+    template <class F, class = std::enable_if_t<std::is_invocable_v<F, Args...> && !std::is_same_v<std::decay_t<F>, callback>>>
+    callback(F &&f) : m_base(std::make_unique<_callback_impl<std::decay_t<F>>>(std::forward<F>(f))) {}
+    callback() = default;
+    callback(callback const &) = delete;
+    callback &operator=(callback const &) = delete;
+    callback(callback &&) = default;
+    callback &operator=(callback &&) = default;
+    void operator()(Args... args) const {
+        assert(m_base);
+        return m_base->_call(std::forward<Args>(args)...);
+    }
+
+    template <class F>
+    F &target() const {
+        assert(m_base);
+        return static_cast<_callback_impl<F> &>(*m_base);
+    }
+    void *leak_address() {
+        return static_cast<void *>(m_base.release());
+    }
+    static callback from_address(void *addr) {
+        callback cb;
+        cb.m_base = std::unique_ptr<_callback_base>(static_cast<_callback_base *>(addr));
+        return cb;
+    }
+};
+
+int epollfd;
+
+struct async_file {
+    int m_fd = -1;
+    async_file() = default;
+    explicit async_file(int fd) : m_fd(fd) {}
+    static async_file async_wrap(int fd) {
+        int flags = CHECK_CALL(fcntl, fd, F_GETFL);
+        flags |= O_NONBLOCK;
+        CHECK_CALL(fcntl, fd, F_SETFL, flags);
+        struct epoll_event event;
+        event.events = EPOLLET;
+        event.data.ptr = nullptr;
+        CHECK_CALL(epoll_ctl, epollfd, EPOLL_CTL_ADD, fd, &event);
+        return async_file{fd};
+    }
+    ssize_t sync_read(bytes_view buf) {
+        return CHECK_CALL(read, m_fd, buf.data(), buf.size());
+    }
+    ssize_t sync_write(bytes_const_view buf) {
+        return CHECK_CALL(write, m_fd, buf.data(), buf.size());
+    }
+    int sync_accept(address_resolver::address &addr) {
+        return CHECK_CALL(accept, m_fd, &addr.m_addr, &addr.m_addrlen);
+    }
+    void async_read(bytes_view buf, callback<ssize_t> cb) {
+        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, read, m_fd, buf.data(), buf.size());
+        if (ret != -1) {
+            cb(ret);
+            return;
+        }
+
+        // 如果 read 可以读了，请操作系统，调用，我这个回调
+        callback<> resume = [this, buf, cb = std::move(cb)] () mutable {
+            return async_read(buf, std::move(cb));
+        };
+        struct epoll_event event;
+        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+        event.data.ptr = resume.leak_address();
+        epoll_ctl(epollfd, EPOLL_CTL_MOD, m_fd, &event);
+    }
+    void async_write(bytes_const_view buf, callback<ssize_t> cb) {
+        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, write, m_fd, buf.data(), buf.size());
+        if (ret != -1) {
+            cb(ret);
+            return;
+        }
+        // 如果 write 可以写了，请操作系统，调用，我这个回调
+        callback<> resume = [this, buf, cb = std::move(cb)] () mutable {
+            return async_write(buf, std::move(cb));
+        };
+        struct epoll_event event;
+        event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
+        event.data.ptr = resume.leak_address();
+        epoll_ctl(epollfd, EPOLL_CTL_MOD, m_fd, &event);
+    }
+    void async_accept(address_resolver::address &addr, callback<int> cb) {
+        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, accept, m_fd, &addr.m_addr, &addr.m_addrlen);
+        if (ret != -1) {
+            cb(ret);
+            return;
+        }
+        // 如果 accept 到请求了，请操作系统，调用，我这个回调
+        callback<> resume = [this, &addr, cb = std::move(cb)] () mutable {
+            return async_accept(addr, std::move(cb));
+        };
+        struct epoll_event event;
+        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+        event.data.ptr = resume.leak_address();
+        CHECK_CALL(epoll_ctl, epollfd, EPOLL_CTL_MOD, m_fd, &event);
+    }
+    async_file(async_file &&that) noexcept : m_fd(that.m_fd) {
+        that.m_fd = -1;
+    }
+    async_file &operator=(async_file &&that) noexcept {
+        std::swap(m_fd, that.m_fd);
+        return *this;
+    }
+    ~async_file() {
+        if (m_fd == -1)
+            return;
+        epoll_ctl(epollfd, EPOLL_CTL_DEL, m_fd, nullptr);
+        close(m_fd);
+    }
+};
+
+struct http_connection_handler : std::enable_shared_from_this<http_connection_handler> {
+    async_file m_conn;
+    bytes_buffer m_readbuf{1024};
+    http_request_parser<> m_req_parser;
+    http_response_writer<> m_res_writer;
+    using pointer = std::shared_ptr<http_connection_handler>;
+    static pointer make() {
+        return std::make_shared<pointer::element_type>();
+    }
+    void do_start(int connfd) {
+        m_conn = async_file::async_wrap(connfd);
+        return do_read();
+    }
+    void do_read() {
+        // fmt::println("开始读取...");
+        // 注意：TCP 基于流，可能粘包
+        return m_conn.async_read(m_readbuf, [self = this->shared_from_this()] (size_t n) {
+            // 如果读到 EOF，说明对面，关闭了连接
+            if (n == 0) {
+                // fmt::println("收到对面关闭了连接");
+                return;
+            }
+            // fmt::println("读取到了 {} 个字节: {}", n, std::string_view{m_buf.data(), n});
+            // 成功读取，则推入解析
+            self->m_req_parser.push_chunk(self->m_readbuf.subspan(0, n));
+            if (!self->m_req_parser.request_finished()) {
+                return self->do_read();
+            } else {
+                return self->do_handle();
+            }
         });
     }
+    void do_handle() {
+        std::string body = std::move(m_req_parser.body());
+        m_req_parser.reset_state();
+        if (body.empty()) {
+            body = "你好，你的请求正文为空哦";
+        } else {
+            body = fmt::format("你好，你的请求是: [{}]，共 {} 字节", body, body.size());
+        }
+        m_res_writer.begin_header(200);
+        m_res_writer.write_header("Server", "co_http");
+        m_res_writer.write_header("Content-type", "text/html;charset=utf-8");
+        m_res_writer.write_header("Connection", "keep-alive");
+        m_res_writer.write_header("Content-length", std::to_string(body.size()));
+        m_res_writer.end_header();
+        // fmt::println("我的响应头: {}", buffer);
+        // fmt::println("我的响应正文: {}", body);
+        // fmt::println("正在响应");
+        m_res_writer.write_body(body);
+        return do_write(m_res_writer.buffer());
+    }
+    void do_write(bytes_const_view buffer) {
+        return m_conn.async_write(buffer, [self = shared_from_this(), buffer] (size_t n) {
+            if (buffer.size() == n) {
+                self->m_res_writer.reset_state();
+                return self->do_read();
+            }
+            return self->do_write(buffer.subspan(n));
+        });
+    }
+};
+
+struct http_acceptor : std::enable_shared_from_this<http_acceptor> {
+    async_file m_listen;
+    address_resolver::address m_addr;
+    using pointer = std::shared_ptr<http_acceptor>;
+    static pointer make() {
+        return std::make_shared<pointer::element_type>();
+    }
+    void do_start(std::string name, std::string port) {
+        address_resolver resolver;
+        fmt::println("正在监听：{}:{}", name, port);
+        auto entry = resolver.resolve(name, port);
+        int listenfd = entry.create_socket_and_bind();
+        m_listen = async_file::async_wrap(listenfd);
+        return do_accept();
+    }
+
+    void do_accept() {
+        return m_listen.async_accept(m_addr, [self = shared_from_this()] (int connfd) {
+            fmt::println("接受了一个连接: {}", connfd);
+            http_connection_handler::make()->do_start(connfd);
+            return self->do_accept();
+        });
+    }
+};
+
+
+void server() {
+    epollfd = epoll_create1(0);
+    auto acceptor = http_acceptor::make();
+    acceptor->do_start("127.0.0.1", "8080");
+    struct epoll_event events[10];
+    while (true) {
+        int ret = epoll_wait(epollfd, events, 1, -1);
+        if (ret < 0)
+            throw;
+        for (int i = 0; i < ret; ++i) {
+            auto cb = callback<>::from_address(events[i].data.ptr);
+            cb();
+        }
+    }
+    // fmt::println("所有任务都完毕了");
+    close(epollfd);
 }
 
 int main(){
     setlocale(LC_ALL, "zh_CN.UTF-8");
     try{
         server();
-    }catch (std::exception const &e){
-        fmt::println("错误： {}", e.what());
+    }catch (std::system_error const &e){
+        fmt::println("错误: {} ({}.{})", e.what(), e.code().category().name(), e.code().value());
     }
-    for(auto &t : pool)
-        {t.join();}
     return 0;
 }
